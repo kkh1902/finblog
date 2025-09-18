@@ -1,0 +1,182 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: finboard-postgres
+    environment:
+      POSTGRES_USER: finboard
+      POSTGRES_PASSWORD: finboard123
+      POSTGRES_DB: finboard
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+      - ./database/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - finboard-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U finboard"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: finboard-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - finboard-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # FastAPI Backend
+  fastapi:
+    build:
+      context: ./BE/fastapi
+      dockerfile: ../../deployment/docker/fastapi.dockerfile
+    container_name: finboard-fastapi
+    environment:
+      DATABASE_URL: postgresql://finboard:finboard123@postgres:5432/finboard
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-your-secret-key-here}
+    volumes:
+      - ./BE/fastapi:/app
+      - fastapi_uploads:/app/uploads
+    ports:
+      - "8001:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - finboard-network
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Flask Backend
+  flask:
+    build:
+      context: ./BE/flask
+      dockerfile: ../../deployment/docker/flask.dockerfile
+    container_name: finboard-flask
+    environment:
+      DATABASE_URL: postgresql://finboard:finboard123@postgres:5432/finboard
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-your-secret-key-here}
+      FLASK_ENV: development
+      FLASK_APP: run.py
+    volumes:
+      - ./BE/flask:/app
+      - flask_uploads:/app/uploads
+    ports:
+      - "8002:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - finboard-network
+    command: flask run --host 0.0.0.0
+
+  # Django Backend
+  django:
+    build:
+      context: ./BE/django
+      dockerfile: ../../deployment/docker/django.dockerfile
+    container_name: finboard-django
+    environment:
+      DATABASE_URL: postgresql://finboard:finboard123@postgres:5432/finboard
+      REDIS_URL: redis://redis:6379
+      SECRET_KEY: ${DJANGO_SECRET_KEY:-your-django-secret-key-here}
+      DEBUG: "True"
+    volumes:
+      - ./BE/django:/app
+      - django_uploads:/app/media
+      - django_static:/app/static
+    ports:
+      - "8003:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - finboard-network
+    command: python manage.py runserver 0.0.0.0:8000
+
+  # Next.js Frontend
+  frontend:
+    build:
+      context: ./FE
+      dockerfile: ../deployment/docker/frontend.dockerfile
+    container_name: finboard-frontend
+    environment:
+      NEXT_PUBLIC_FASTAPI_URL: http://localhost:8001
+      NEXT_PUBLIC_FLASK_URL: http://localhost:8002
+      NEXT_PUBLIC_DJANGO_URL: http://localhost:8003
+      NEXT_PUBLIC_DEFAULT_BACKEND: fastapi
+    volumes:
+      - ./FE:/app
+      - /app/node_modules
+      - /app/.next
+    ports:
+      - "3000:3000"
+    depends_on:
+      - fastapi
+      - flask
+      - django
+    networks:
+      - finboard-network
+    command: npm run dev
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: finboard-nginx
+    volumes:
+      - ./deployment/nginx/nginx.conf:/etc/nginx/nginx.conf
+    ports:
+      - "80:80"
+    depends_on:
+      - frontend
+      - fastapi
+      - flask
+      - django
+    networks:
+      - finboard-network
+
+  # pgAdmin for Database Management (Optional)
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: finboard-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@finboard.com
+      PGADMIN_DEFAULT_PASSWORD: admin123
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+    networks:
+      - finboard-network
+    profiles:
+      - tools
+
+networks:
+  finboard-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  fastapi_uploads:
+  flask_uploads:
+  django_uploads:
+  django_static:
